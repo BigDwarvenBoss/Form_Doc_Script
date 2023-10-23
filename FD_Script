@@ -1,0 +1,161 @@
+using ITnet2.Common.Data;
+using ITnet2.Common.Tools;
+using ITnet2.Server.BusinessLogic.Core.Documents;
+using ITnet2.Server.BusinessLogic.Core.Documents.DataLayer;
+using ITnet2.Server.BusinessLogic.Core.Tools;
+using ITnet2.Server.Controls;
+using ITnet2.Server.Data;
+using ITnet2.Server.Dialogs;
+using ITnet2.Server.Runtime.Methods;
+using ITnet2.Server.Session;
+using System;
+using System.Collections.Generic;
+
+/// <summary>
+/// Бизнес-логика метода _FD
+/// </summary>
+public class RrtMethodLogic : UserRequestMethodBusinessLogic
+{
+    //Отключаем экран редактирования заголовка документа и прописываем тип создаваемого документа
+    private bool _SkipEditScreen = true;
+    private string KDMT = "_ACTOUTS";
+    
+
+    public override void Call()
+    {
+        //Создаём новый документ
+        Document document = new Document();
+        //Активируем форму, в которой отображены договоры, по которым ещё не сформированы отчёты
+        var form = InputForm.Activate("_FD");
+        //Начинаем формировать документы. В начале рассматриваем случай, когда надо оформить документы за декабрь
+        if (DateTime.Now.Month == 1)
+        {
+            //Формируем дату, которая проставляется в документ (последний день месяца)
+            DateTime DateTo = new DateTime((DateTime.Now.Year) - 1, 12, 31);
+            if (form.Success)
+            {
+                //Из специального поля в форме извлекаем список договоров, по которым ещё не сформированы отчёты
+                var undog_list = form.InputFormValues.GetValue<string>("UNDOG").Split(',');
+                foreach (string undog in undog_list)
+                {
+                    //Подготавливаем переменные, в которые запишем номер договора, контрагента и код объекта, от которого составляется документ
+                    int undog_int = Convert.ToInt32(undog);
+                    var org = SqlClient.CreateCommand($@"select ORG from DOG where DOG.UNDOG = {undog_int}").ExecScalar<int>();
+                    var kobj = SqlClient.CreateCommand($@"select KOBJ from DOG where DOG.UNDOG = {undog_int}").ExecScalar<string>();
+
+
+                    //Запускаем модуль создания документов и начинаем заполнять поля
+                    var edit_Row_PR_M333IS = new DataEditor.EditRecordStartInfo("DMZ10")
+                    {
+                        EditMode = EditMode.Add,
+                        SkipFilterDialogs = true,
+                        //Поля, которые заполняются: тип документа (KDMT), дата движения документа (DDM), контрагент (ORG), объект дебета (KOBJ_DB), объект кредита (KOBJ_CR), номер договора (UNDOG)
+                        ValuesToInitialize = new Dictionary<string, object>{
+                                                                    { "KDMT", KDMT},
+                                                                    { "DDM", DateTo},
+                                                                    { "ORG", org},
+                                                                    { "KOBJ_DB", kobj},
+                                                                    { "KOBJ_CR", kobj},
+                                                                    { "UNDOG", undog_int},
+                                                                },
+                        LockInitializedValues = false,
+                        SkipEditScreen = _SkipEditScreen,
+                        SkipEditScreenOnValidFailed = false,
+                    };
+                    edit_Row_PR_M333IS.CustomProperties.Add("FROMCSCHARP", false); //Отключает форму введения строк
+                    DataEditor.Call(edit_Row_PR_M333IS); //Вызываем модуль, создающий документ с заданными параметрами
+                    //Далее подстраховка на случай неправильных данных в документе
+                    SqlClient.CreateCommand($@"UPDATE DMZ SET DMZ.DDM = @DDM where DMZ.UNDOC={edit_Row_PR_M333IS.ModifiedDataRow.GetFieldValue<int>("UNDOC")}", new SqlParam("DDM", DateTo)).ExecNonQuery();
+                    SqlClient.CreateCommand($@"UPDATE DMZ SET DMZ.KOBJ_CR = @KOBJ where DMZ.UNDOC={edit_Row_PR_M333IS.ModifiedDataRow.GetFieldValue<int>("UNDOC")}", new SqlParam("KOBJ", kobj)).ExecNonQuery();
+                    SqlClient.CreateCommand($@"UPDATE DMZ SET DMZ.KOBJ_DB = @KOBJ where DMZ.UNDOC={edit_Row_PR_M333IS.ModifiedDataRow.GetFieldValue<int>("UNDOC")}", new SqlParam("KOBJ", kobj)).ExecNonQuery();
+                    //Ниже вызываем методы, формирующие журнал работ для созданного акта и строки в самом акте
+                    var col = new DataEditor.StartInfo("DMZ10")
+                    {
+                        SkipFilterDialogs = true,
+                        Editable = true,
+                        StartMode = new DataEditor.StartInfo.DataEditorStartMode(new DataEditor.StartInfo.RrtStartMode(DataEditor.StartInfo.RrtStartMode.MethodType.Calculation, "_FJ") { ExitAfterCall = true }),
+                        PrimaryKeyFilter = new Dictionary<string, object>() { { "UNDOC", edit_Row_PR_M333IS.ModifiedDataRow.GetFieldValue<int>("UNDOC") } },
+
+                    };
+                    DataEditor.Call(col);
+                    var row = new DataEditor.StartInfo("DMZ10")
+                    {
+                        SkipFilterDialogs = true,
+                        Editable = true,
+                        StartMode = new DataEditor.StartInfo.DataEditorStartMode(new DataEditor.StartInfo.RrtStartMode(DataEditor.StartInfo.RrtStartMode.MethodType.Calculation, "_FS") { ExitAfterCall = true }),
+                        PrimaryKeyFilter = new Dictionary<string, object>() { { "UNDOC", edit_Row_PR_M333IS.ModifiedDataRow.GetFieldValue<int>("UNDOC") } },
+                    };
+                    DataEditor.Call(row);
+                }
+            }
+
+        }
+        //То же самое, что и выше, но для остальных месяцев в году
+        else
+        {
+            DateTime DateFrom = new DateTime(DateTime.Now.Year, (DateTime.Now.Month) - 1, 1);
+            DateTime LD = Date.LastDateOfMonth(DateFrom.Year, DateFrom.Month);
+            DateTime DateTo = new DateTime(DateTime.Now.Year, (DateTime.Now.Month) - 1, LD.Day);
+            if (form.Success)
+            {
+
+                var undog_list = form.InputFormValues.GetValue<string>("UNDOG").Split(',');
+                foreach (string undog in undog_list)
+                {
+                    int undog_int = Convert.ToInt32(undog);
+                    var org = SqlClient.CreateCommand($@"select ORG from DOG where DOG.UNDOG = {undog_int}").ExecScalar<int>();
+                    var kobj = SqlClient.CreateCommand($@"select KOBJ from DOG where DOG.UNDOG = {undog_int}").ExecScalar<string>();
+
+
+
+                    var edit_Row_PR_M333IS = new DataEditor.EditRecordStartInfo("DMZ10")
+                    {
+                        EditMode = EditMode.Add,
+                        SkipFilterDialogs = true,
+                        ValuesToInitialize = new Dictionary<string, object>{
+                                                                    { "KDMT", KDMT},
+                                                                    { "DDM", DateTo},
+                                                                    { "ORG", org},
+                                                                    { "KOBJ_DB", kobj},
+                                                                    { "KOBJ_CR", kobj},
+                                                                    { "UNDOG", undog_int},
+                                                                },
+                        LockInitializedValues = false,
+                        SkipEditScreen = _SkipEditScreen,
+                        SkipEditScreenOnValidFailed = false,
+                    };
+                    edit_Row_PR_M333IS.CustomProperties.Add("FROMCSCHARP", false); //Отключает форму введения строк
+                    DataEditor.Call(edit_Row_PR_M333IS);
+                    SqlClient.CreateCommand($@"UPDATE DMZ SET DMZ.DDM = @DDM where DMZ.UNDOC={edit_Row_PR_M333IS.ModifiedDataRow.GetFieldValue<int>("UNDOC")}", new SqlParam("DDM", DateTo)).ExecNonQuery();
+                    SqlClient.CreateCommand($@"UPDATE DMZ SET DMZ.KOBJ_CR = @KOBJ where DMZ.UNDOC={edit_Row_PR_M333IS.ModifiedDataRow.GetFieldValue<int>("UNDOC")}", new SqlParam("KOBJ", kobj)).ExecNonQuery();
+                    SqlClient.CreateCommand($@"UPDATE DMZ SET DMZ.KOBJ_DB = @KOBJ where DMZ.UNDOC={edit_Row_PR_M333IS.ModifiedDataRow.GetFieldValue<int>("UNDOC")}", new SqlParam("KOBJ", kobj)).ExecNonQuery();
+                    var col = new DataEditor.StartInfo("DMZ10")
+                    {
+                        SkipFilterDialogs = true,
+                        Editable = true,
+                        StartMode = new DataEditor.StartInfo.DataEditorStartMode(new DataEditor.StartInfo.RrtStartMode(DataEditor.StartInfo.RrtStartMode.MethodType.Calculation, "_FJ") { ExitAfterCall = true }),
+                        PrimaryKeyFilter = new Dictionary<string, object>() { { "UNDOC", edit_Row_PR_M333IS.ModifiedDataRow.GetFieldValue<int>("UNDOC") } },
+
+                    };
+                    DataEditor.Call(col);
+                    var row = new DataEditor.StartInfo("DMZ10")
+                    {
+                        SkipFilterDialogs = true,
+                        Editable = true,
+                        StartMode = new DataEditor.StartInfo.DataEditorStartMode(new DataEditor.StartInfo.RrtStartMode(DataEditor.StartInfo.RrtStartMode.MethodType.Calculation, "_FS") { ExitAfterCall = true }),
+                        PrimaryKeyFilter = new Dictionary<string, object>() { { "UNDOC", edit_Row_PR_M333IS.ModifiedDataRow.GetFieldValue<int>("UNDOC") } },
+                    };
+                    DataEditor.Call(row);
+                }
+            }
+        }
+
+
+
+
+       
+        base.Call();
+        //Пересчитываем поля курсора интерфейса
+        Cursor.ReRead();
+    }
+}
